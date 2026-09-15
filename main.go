@@ -98,7 +98,7 @@ func makeSlug(title string) string {
 	return slug
 }
 
-// 1. GUARDA LAS OFERTAS REALES ENVIADAS DESDE EL FRONTEND EN POSTGRESQL
+// 1. GUARDA OFERTAS REALES DE TIENDAS VERIFICADAS (Steam, GOG, Humble, Epic)
 func handleSyncCheapShark(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
@@ -114,6 +114,17 @@ func handleSyncCheapShark(w http.ResponseWriter, r *http.Request) {
 
 	insertados := 0
 	for _, deal := range deals {
+		storeID, _ := strconv.Atoi(deal.StoreID)
+		
+		// Verificar que la tienda exista en nuestra DB (Steam=1, GOG=7, Humble=11, Epic=25)
+		var existStore int
+		_ = db.QueryRow("SELECT id FROM stores WHERE id = $1", storeID).Scan(&existStore)
+		
+		// SI LA TIENDA NO ES DE NUESTRO CATÁLOGO, SE IGNORA (NO SE ASIGNA A STEAM A LA FUERZA)
+		if existStore == 0 {
+			continue
+		}
+
 		slug := makeSlug(deal.Title)
 
 		var gameID int
@@ -125,13 +136,6 @@ func handleSyncCheapShark(w http.ResponseWriter, r *http.Request) {
 
 		if gameID == 0 {
 			continue
-		}
-
-		storeID, _ := strconv.Atoi(deal.StoreID)
-		var existStore int
-		_ = db.QueryRow("SELECT id FROM stores WHERE id = $1", storeID).Scan(&existStore)
-		if existStore == 0 {
-			storeID = 1 // Asigna Steam por defecto si no coincide la tienda
 		}
 
 		var storeProductID int
@@ -165,7 +169,7 @@ func handleSyncCheapShark(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": fmt.Sprintf("¡Éxito! Se sincronizaron %d juegos con OFERTAS REALES en PostgreSQL", insertados),
+		"message": fmt.Sprintf("¡Éxito! Se sincronizaron %d ofertas VERIFICADAS en PostgreSQL", insertados),
 	})
 }
 
@@ -185,9 +189,9 @@ func handleGames(w http.ResponseWriter, r *http.Request) {
 				COALESCE(cp.discount_percentage, 0) AS discount_percentage,
 				COALESCE(sp.id, 0) AS store_product_id
 			FROM games g
-			LEFT JOIN store_products sp ON g.id = sp.game_id
-			LEFT JOIN stores s ON sp.store_id = s.id
-			LEFT JOIN current_prices cp ON sp.id = cp.store_product_id
+			INNER JOIN store_products sp ON g.id = sp.game_id
+			INNER JOIN stores s ON sp.store_id = s.id
+			INNER JOIN current_prices cp ON sp.id = cp.store_product_id
 			ORDER BY g.id DESC;
 		`)
 		if err != nil {
