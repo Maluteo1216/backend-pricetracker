@@ -87,7 +87,6 @@ func handleHome(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Genera un slug limpio y seguro para la DB
 func makeSlug(title string) string {
 	reg, _ := regexp.Compile("[^a-zA-Z0-9]+")
 	slug := strings.ToLower(title)
@@ -99,7 +98,7 @@ func makeSlug(title string) string {
 	return slug
 }
 
-// 1. CONEXIÓN A CHEAPSHARK API (Con Respaldo Garantizado)
+// 1. GUARDA LAS OFERTAS REALES ENVIADAS DESDE EL FRONTEND EN POSTGRESQL
 func handleSyncCheapShark(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
@@ -107,34 +106,10 @@ func handleSyncCheapShark(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var deals []CheapSharkDeal
-
-	// Intentar obtener datos de la API de CheapShark
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", "https://www.cheapshark.com/api/1.0/deals?pageSize=10", nil)
-	if err == nil {
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-		req.Header.Set("Accept", "application/json")
-		resp, errDo := client.Do(req)
-		if errDo == nil && resp.StatusCode == 200 {
-			_ = json.NewDecoder(resp.Body).Decode(&deals)
-			resp.Body.Close()
-		}
-	}
-
-	// Si CheapShark bloqueó la petición, usar el catálogo de ofertas de respaldo
-	if len(deals) == 0 {
-		deals = []CheapSharkDeal{
-			{Title: "The Witcher 3: Wild Hunt", SalePrice: "9.99", NormalPrice: "39.99", Savings: "75.00", StoreID: "1", DealID: "witcher3_deal", Thumb: "https://cdn.cloudflare.steamstatic.com/steam/apps/292030/header.jpg"},
-			{Title: "Cyberpunk 2077", SalePrice: "29.99", NormalPrice: "59.99", Savings: "50.00", StoreID: "1", DealID: "cp2077_deal", Thumb: "https://cdn.cloudflare.steamstatic.com/steam/apps/1091500/header.jpg"},
-			{Title: "Grand Theft Auto V", SalePrice: "14.99", NormalPrice: "29.99", Savings: "50.00", StoreID: "25", DealID: "gtav_deal", Thumb: "https://cdn.cloudflare.steamstatic.com/steam/apps/271590/header.jpg"},
-			{Title: "Elden Ring", SalePrice: "35.99", NormalPrice: "59.99", Savings: "40.00", StoreID: "1", DealID: "eldenring_deal", Thumb: "https://cdn.cloudflare.steamstatic.com/steam/apps/1245620/header.jpg"},
-			{Title: "Hollow Knight", SalePrice: "7.49", NormalPrice: "14.99", Savings: "50.00", StoreID: "7", DealID: "hollow_deal", Thumb: "https://cdn.cloudflare.steamstatic.com/steam/apps/367520/header.jpg"},
-			{Title: "Red Dead Redemption 2", SalePrice: "19.79", NormalPrice: "59.99", Savings: "67.00", StoreID: "1", DealID: "rdr2_deal", Thumb: "https://cdn.cloudflare.steamstatic.com/steam/apps/1174180/header.jpg"},
-			{Title: "God of War", SalePrice: "24.99", NormalPrice: "49.99", Savings: "50.00", StoreID: "25", DealID: "gow_deal", Thumb: "https://cdn.cloudflare.steamstatic.com/steam/apps/1593500/header.jpg"},
-			{Title: "Hades", SalePrice: "12.49", NormalPrice: "24.99", Savings: "50.00", StoreID: "11", DealID: "hades_deal", Thumb: "https://cdn.cloudflare.steamstatic.com/steam/apps/1145360/header.jpg"},
-			{Title: "Celeste", SalePrice: "4.99", NormalPrice: "19.99", Savings: "75.00", StoreID: "1", DealID: "celeste_deal", Thumb: "https://cdn.cloudflare.steamstatic.com/steam/apps/504230/header.jpg"},
-			{Title: "Stardew Valley", SalePrice: "11.99", NormalPrice: "14.99", Savings: "20.00", StoreID: "7", DealID: "stardew_deal", Thumb: "https://cdn.cloudflare.steamstatic.com/steam/apps/413150/header.jpg"},
-		}
+	err := json.NewDecoder(r.Body).Decode(&deals)
+	if err != nil || len(deals) == 0 {
+		http.Error(w, "No se recibieron ofertas válidas", http.StatusBadRequest)
+		return
 	}
 
 	insertados := 0
@@ -156,7 +131,7 @@ func handleSyncCheapShark(w http.ResponseWriter, r *http.Request) {
 		var existStore int
 		_ = db.QueryRow("SELECT id FROM stores WHERE id = $1", storeID).Scan(&existStore)
 		if existStore == 0 {
-			storeID = 1
+			storeID = 1 // Asigna Steam por defecto si no coincide la tienda
 		}
 
 		var storeProductID int
@@ -190,7 +165,7 @@ func handleSyncCheapShark(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": fmt.Sprintf("¡Éxito! Se sincronizaron %d juegos reales en la Base de Datos", insertados),
+		"message": fmt.Sprintf("¡Éxito! Se sincronizaron %d juegos con OFERTAS REALES en PostgreSQL", insertados),
 	})
 }
 
