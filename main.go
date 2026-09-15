@@ -40,7 +40,7 @@ func main() {
 	var err error
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		fmt.Println("Advertencia: No se encontró DATABASE_URL")
+		fmt.Println("Advertencia: No se encontró la variable de entorno DATABASE_URL")
 	}
 
 	db, err = sql.Open("postgres", dbURL)
@@ -58,8 +58,11 @@ func main() {
 		port = "8080"
 	}
 
-	fmt.Println("Servidor iniciado en puerto " + port)
-	http.ListenAndServe(":"+port, nil)
+	fmt.Println("Servidor iniciado en el puerto " + port)
+	err = http.ListenAndServe(":"+port, nil)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -75,60 +78,84 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// 1. CONEXIÓN A CHEAPSHARK API: Trae juegos reales y los guarda en PostgreSQL
+// 1. CONEXIÓN A CHEAPSHARK API: Trae juegos reales evitando bloqueos de Cloudflare
 func handleSyncCheapShark(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Consultar ofertas reales desde CheapShark API
-	resp, err := http.Get("https://www.cheapshark.com/api/1.0/deals?pageSize=10")
+	// Crear cliente HTTP simulando un navegador web real
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", "https://www.cheapshark.com/api/1.0/deals?pageSize=10", nil)
 	if err != nil {
-		http.Error(w, "Error consultando CheapShark API", http.StatusInternalServerError)
+		http.Error(w, "Error al crear la petición", http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		http.Error(w, fmt.Sprintf("Error consultando CheapShark API (Código HTTP: %d)", resp.StatusCode), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
 
 	var deals []CheapSharkDeal
-	json.NewDecoder(resp.Body).Decode(&deals)
+	if err := json.NewDecoder(resp.Body).Decode(&deals); err != nil {
+		http.Error(w, "Error al procesar el JSON de CheapShark", http.StatusInternalServerError)
+		return
+	}
 
 	insertados := 0
 	for _, deal := range deals {
-		slug := strings.ToLower(strings.ReplaceAll(deal.Title, " ", "-"))
-		
-		// Insertar o recuperar el juego en la tabla games
+		// Formatear y limpiar el slug
+		slug := strings.ToLower(deal.Title)
+		slug = strings.ReplaceAll(slug, " ", "-")
+		slug = strings.ReplaceAll(slug, ":", "")
+		slug = strings.ReplaceAll(slug, "'", "")
+		slug = strings.ReplaceAll(slug, "!", "")
+		slug = strings.ReplaceAll(slug, "?", "")
+
+		// Insertar o recuperar la ID del juego
 		var gameID int
 		err := db.QueryRow("INSERT INTO games (title, slug, cover_image_url) VALUES ($1, $2, $3) ON CONFLICT (slug) DO UPDATE SET title=EXCLUDED.title RETURNING id;",
 			deal.Title, slug, deal.Thumb).Scan(&gameID)
 		if err != nil {
+			_ = db.QueryRow("SELECT id FROM games WHERE slug = $1", slug).Scan(&gameID)
+		}
+
+		if gameID == 0 {
 			continue
 		}
 
 		storeID, _ := strconv.Atoi(deal.StoreID)
-		// Verificar que la tienda exista en nuestra DB
 		var existStore int
-		db.QueryRow("SELECT id FROM stores WHERE id = $1", storeID).Scan(&existStore)
+		_ = db.QueryRow("SELECT id FROM stores WHERE id = $1", storeID).Scan(&existStore)
 		if existStore == 0 {
-			storeID = 1 // Por defecto asigna Steam si no coincide
+			storeID = 1 // Steam por defecto si no coincide la tienda
 		}
 
-		// Insertar producto por tienda
+		// Insertar vinculación del producto por tienda
 		var storeProductID int
 		productURL := "https://www.cheapshark.com/redirect?dealID=" + deal.DealID
 		err = db.QueryRow("INSERT INTO store_products (game_id, store_id, external_store_id, product_url) VALUES ($1, $2, $3, $4) ON CONFLICT (game_id, store_id) DO UPDATE SET product_url=EXCLUDED.product_url RETURNING id;",
 			gameID, storeID, deal.DealID, productURL).Scan(&storeProductID)
 		if err != nil {
+			_ = db.QueryRow("SELECT id FROM store_products WHERE game_id = $1 AND store_id = $2", gameID, storeID).Scan(&storeProductID)
+		}
+
+		if storeProductID == 0 {
 			continue
 		}
 
-		// Convertir precios
+		// Convertir precios numéricos
 		regPrice, _ := strconv.ParseFloat(deal.NormalPrice, 64)
 		curPrice, _ := strconv.ParseFloat(deal.SalePrice, 64)
 		discount, _ := strconv.ParseFloat(deal.Savings, 64)
 		isOnSale := curPrice < regPrice
 
-		// Insertar precio actual
+		// Actualizar o insertar el precio actual
 		_, err = db.Exec(`
 			INSERT INTO current_prices (store_product_id, regular_price, current_price, discount_percentage, is_on_sale)
 			VALUES ($1, $2, $3, $4, $5)
@@ -193,6 +220,9 @@ func handleGames(w http.ResponseWriter, r *http.Request) {
 				"discount_percentage": discount,
 				"store_product_id":    storeProductID,
 			})
+		}
+		if lista == nil {
+			lista = []map[string]interface{}{}
 		}
 		json.NewEncoder(w).Encode(lista)
 
